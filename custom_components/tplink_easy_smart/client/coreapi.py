@@ -320,7 +320,14 @@ class TpLinkWebApi:
                 )
                 raise AuthenticationError("Failed to get index", AUTH_FAILURE_GENERAL)
 
-            result = await _get_response_text(response)
+            try:
+                result = await _get_response_text(response)
+            except ServerDisconnectedError as ex:
+                raise ApiCallError(
+                    "Connection closed while reading logon.cgi response",
+                    APICALL_ERRCODE_DISCONNECTED,
+                    APICALL_ERRCAT_DISCONNECTED,
+                ) from ex
             if not result:
                 raise AuthenticationError(
                     "Failed to get Logon response body", AUTH_FAILURE_GENERAL
@@ -364,16 +371,39 @@ class TpLinkWebApi:
         except AuthenticationError as ex:
             _LOGGER.warning("Authentication failed: %s", {repr(ex)})
             raise
-        except ApiCallError as ex:
-            _LOGGER.warning("Authentication failed: %s", {repr(ex)})
-            raise AuthenticationError(
-                "Authentication failed due to api call error", AUTH_FAILURE_GENERAL
-            )
+        except ApiCallError:
+            # A transport failure is not a credential rejection.
+            _LOGGER.debug("Switch transport error during authentication", exc_info=True)
+            raise
         except Exception as ex:
             _LOGGER.warning("Authentication failed: %s", {repr(ex)})
             raise AuthenticationError(
                 "Authentication failed due to unknown error", AUTH_FAILURE_GENERAL
             )
+
+    async def _read_get_with_retry(self, path: str) -> tuple[ClientResponse, str]:
+        """Retry a disconnected read-only GET once without clearing cookies.
+
+        aiohttp discards a disconnected TCP connection from its pool.
+        Never retry device-changing POST calls: their outcome is unknown.
+        """
+        for attempt in range(2):
+            try:
+                response = await self._get_raw(path)
+                return response, await _get_response_text(response)
+            except ApiCallError as ex:
+                if ex.code != APICALL_ERRCODE_DISCONNECTED or attempt:
+                    raise
+            except ServerDisconnectedError as ex:
+                if attempt:
+                    raise ApiCallError(
+                        f"GET {path} disconnected while reading response",
+                        APICALL_ERRCODE_DISCONNECTED,
+                        APICALL_ERRCAT_DISCONNECTED,
+                    ) from ex
+            _LOGGER.debug("GET %s disconnected; retrying read once", path)
+            await asyncio.sleep(0.2)
+        raise AssertionError("Unreachable GET retry loop")
 
     async def get(
         self, path: str, query: str | None = None, **kwargs: any
@@ -388,16 +418,14 @@ class TpLinkWebApi:
                 kwargs.get("check_authorized") or _check_authorized
             )
 
-            response = await self._get_raw(relative_url)
-            response_text = await _get_response_text(response)
+            response, response_text = await self._read_get_with_retry(relative_url)
             _LOGGER.debug("Response: %s", response_text)
 
             if not check_authorized(response, response_text):
                 _LOGGER.debug("GET seems unauthorized, trying to re-authenticate")
                 await self.authenticate()
 
-                response = await self._get_raw(relative_url)
-                response_text = await _get_response_text(response)
+                response, response_text = await self._read_get_with_retry(relative_url)
 
                 if not check_authorized(response, response_text):
                     raise ApiCallError(
