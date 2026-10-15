@@ -26,4 +26,6 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install pytest aiohttp json5==0.9.10
       - name: Run regression tests
-        run: python -m pytest -q tests/test_connection_recovery.py
+        run: |
+          python -m compileall -q custom_components/tplink_easy_smart
+          python -m pytest -q tests/test_connection_recovery.py tests/test_coordinator_disconnect.py
