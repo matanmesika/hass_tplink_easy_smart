@@ -15,10 +15,11 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .client.classes import PoePowerLimit, PoePriority, TpLinkSystemInfo
 from .client.const import FEATURE_POE
+from .client.coreapi import ApiCallError, APICALL_ERRCAT_DISCONNECTED
 from .client.tplink_api import PoeState, PortPoeState, PortSpeed, PortState, TpLinkApi
 from .const import ATTR_MANUFACTURER, DEFAULT_SCAN_INTERVAL, DOMAIN
 
@@ -118,10 +119,14 @@ class TpLinkDataUpdateCoordinator(DataUpdateCoordinator):
     async def async_update(self) -> None:
         """Asynchronous update of all data."""
         _LOGGER.debug("Update started")
-        await self._update_switch_info()
-        await self._update_port_states()
-        await self._update_poe_state()
-        await self._update_port_poe_states()
+        try:
+            await self._update_switch_info()
+            await self._update_port_states()
+            await self._update_poe_state()
+            await self._update_port_poe_states()
+        except ApiCallError as ex:
+            # Failed polling must not report empty-but-successful data.
+            raise UpdateFailed(f"Switch API connection unavailable: {ex}") from ex
         _LOGGER.debug("Update completed")
 
     async def async_unload(self) -> None:
@@ -136,6 +141,11 @@ class TpLinkDataUpdateCoordinator(DataUpdateCoordinator):
         """Update port states."""
         try:
             self._port_states = await self._api.get_port_states()
+        except ApiCallError as ex:
+            if ex.category == APICALL_ERRCAT_DISCONNECTED:
+                raise
+            _LOGGER.warning("Can not get port states: %s", repr(ex))
+            self._port_states = []
         except Exception as ex:
             _LOGGER.warning("Can not get port states: %s", repr(ex))
             self._port_states = []
@@ -148,6 +158,10 @@ class TpLinkDataUpdateCoordinator(DataUpdateCoordinator):
 
         try:
             self._poe_state = await self._api.get_poe_state()
+        except ApiCallError as ex:
+            if ex.category == APICALL_ERRCAT_DISCONNECTED:
+                raise
+            _LOGGER.warning("Can not get poe state: %s", repr(ex))
         except Exception as ex:
             _LOGGER.warning("Can not get poe state: %s", repr(ex))
 
@@ -159,6 +173,11 @@ class TpLinkDataUpdateCoordinator(DataUpdateCoordinator):
 
         try:
             self._port_poe_states = await self._api.get_port_poe_states()
+        except ApiCallError as ex:
+            if ex.category == APICALL_ERRCAT_DISCONNECTED:
+                raise
+            _LOGGER.warning("Can not get port poe states: %s", repr(ex))
+            self._port_poe_states = []
         except Exception as ex:
             _LOGGER.warning("Can not get port poe states: %s", repr(ex))
             self._port_poe_states = []
